@@ -1,0 +1,6 @@
+{
+  "enabledMcpjsonServers": [
+    "paper-distill"
+  ],
+  "enableAllProjectMcpServers": true
+}
